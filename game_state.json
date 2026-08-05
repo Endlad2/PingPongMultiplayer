@@ -1,0 +1,18 @@
+{
+  "ball": {
+    "x": 0.0,
+    "y": 46.5,
+    "dx": -4,
+    "dy": 3.5
+  },
+  "left_paddle": {
+    "x": 30,
+    "y": 230
+  },
+  "right_paddle": {
+    "x": 750,
+    "y": 230
+  },
+  "status": "lose",
+  "time_elapsed": 1.6
+}
