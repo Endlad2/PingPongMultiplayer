@@ -29,6 +29,34 @@ def parse_arguments():
     parser.add_argument('--connect', type=str, required=True, help='Server URL (e.g., https://merkuriy.space/game.php)')
     return parser.parse_args()
 
+def test_connection(url):
+    try:
+        response = requests.get(url, timeout=2)
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    print("Connection successful! Server responded with valid JSON.")
+                    return True
+                else:
+                    print("Connection failed: Server did not return a JSON object")
+                    return False
+            except json.JSONDecodeError:
+                print("Connection failed: Server response is not valid JSON")
+                return False
+        else:
+            print(f"Connection failed: Server returned status {response.status_code}")
+            return False
+    except requests.exceptions.ConnectionError:
+        print(f"Connection failed: Cannot reach {url}")
+        return False
+    except requests.exceptions.Timeout:
+        print(f"Connection failed: Server at {url} is not responding (timeout)")
+        return False
+    except Exception as e:
+        print(f"Connection failed: {e}")
+        return False
+
 def get_game_state(url):
     try:
         response = requests.get(url, timeout=0.2)
@@ -139,7 +167,6 @@ class Game:
         self.small_font = pygame.font.Font(None, 28)
         self.player_id = player_id
         self.url = url
-        self.last_sync_time = 0
         self.connection_error = False
         self.error_message = ""
         
@@ -152,7 +179,13 @@ class Game:
         }
         
         print(f"Player {player_id} connecting to {url}")
-        print("Press ESC to quit.")
+        
+        if not test_connection(url):
+            self.connection_error = True
+            self.error_message = "Cannot connect to server"
+            print("Press ESC to quit or wait for reconnection...")
+        else:
+            print("Connected successfully! Press ESC to quit.")
     
     def update_game_state(self):
         self.game_state["ball"]["x"] = self.ball.x
@@ -191,7 +224,7 @@ class Game:
                 self.running = False
         else:
             self.connection_error = True
-            self.error_message = "Failed to connect to server"
+            self.error_message = "Lost connection to server"
     
     def sync_to_server(self):
         self.update_game_state()
@@ -248,10 +281,12 @@ class Game:
         elapsed = (pygame.time.get_ticks() - self.start_time) / 1000
         
         if self.connection_error:
-            error_text = self.small_font.render("CONNECTION ERROR", True, (255, 0, 0))
-            self.screen.blit(error_text, (SCREEN_WIDTH//2 - error_text.get_width()//2, 50))
+            error_text = self.big_font.render("CONNECTION FAILED", True, (255, 0, 0))
+            self.screen.blit(error_text, (SCREEN_WIDTH//2 - error_text.get_width()//2, SCREEN_HEIGHT//2 - 100))
             msg_text = self.small_font.render(self.error_message, True, (255, 0, 0))
-            self.screen.blit(msg_text, (SCREEN_WIDTH//2 - msg_text.get_width()//2, 80))
+            self.screen.blit(msg_text, (SCREEN_WIDTH//2 - msg_text.get_width()//2, SCREEN_HEIGHT//2 - 30))
+            retry_text = self.small_font.render("Trying to reconnect...", True, (255, 255, 0))
+            self.screen.blit(retry_text, (SCREEN_WIDTH//2 - retry_text.get_width()//2, SCREEN_HEIGHT//2 + 20))
         
         time_text = self.font.render(f"Time: {int(elapsed)}s", True, WHITE)
         self.screen.blit(time_text, (10, 10))
@@ -283,6 +318,7 @@ class Game:
     
     def run(self):
         frame_count = 0
+        reconnect_counter = 0
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -295,7 +331,19 @@ class Game:
                     if event.key == pygame.K_r and (self.game_status == "win" or self.game_status == "lose"):
                         self.restart()
             
-            if self.running:
+            if self.connection_error:
+                reconnect_counter += 1
+                if reconnect_counter % 60 == 0:
+                    if test_connection(self.url):
+                        self.connection_error = False
+                        self.error_message = ""
+                        print("Reconnected successfully!")
+                        if self.player_id == 1:
+                            self.sync_to_server()
+                        else:
+                            self.sync_from_server()
+            
+            if self.running and not self.connection_error:
                 if self.player_id == 1:
                     self.handle_input()
                     self.ball.update()
