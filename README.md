@@ -2,5 +2,5 @@
 npm ci
 node api.js
 
-Вторя консоль
+Вторая консоль
 py game.py
