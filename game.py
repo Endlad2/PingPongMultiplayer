@@ -136,7 +136,8 @@ class NetworkClient:
         self.status = "waiting"
         self.last_sync_time = 0
         self.sync_interval = 1.0 / 30
-        self.room_ready = False  # Флаг готовности комнаты
+        self.room_ready = False
+        self.last_received_time = 0
     
     def create_room(self, name_hash: str, password: str):
         try:
@@ -240,6 +241,7 @@ class NetworkClient:
                 state = data.get("state", {})
                 if state:
                     self.game_state = state
+                    self.last_received_time = time.time()
                     
             elif msg_type == "paddle_move":
                 paddle_data = data.get("paddle", {})
@@ -468,7 +470,8 @@ class Game:
         self.start_time = None
         self.last_paddle_sync = 0
         self.paddle_sync_interval = 1.0 / 15
-        self.waiting_for_start = True
+        self.last_game_state_send = 0
+        self.game_state_send_interval = 1.0 / 30  # 30 раз в секунду
         
         print("[GAME] Game ready!")
     
@@ -556,7 +559,9 @@ class Game:
                 self.winner = "me" if self.is_host else "opponent"
                 self.running = False
             
-            if self.game_status == "running":
+            # Постоянно отправляем состояние игры (30 раз в секунду)
+            current_time = time.time()
+            if current_time - self.last_game_state_send >= self.game_state_send_interval:
                 state = {
                     "ball": self.ball.to_dict(),
                     "left_paddle": self.left_paddle.to_dict(),
@@ -565,7 +570,9 @@ class Game:
                     "time": time.time() - self.start_time if self.start_time else 0
                 }
                 self.network.send_game_state(state)
+                self.last_game_state_send = current_time
             
+            # Получаем движение ракетки от клиента
             opponent_paddle = self.network.get_opponent_paddle()
             if opponent_paddle:
                 self.right_paddle.from_dict(opponent_paddle)
@@ -651,6 +658,7 @@ class Game:
                         self.left_paddle.set_position(30, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
                         self.right_paddle.set_position(SCREEN_WIDTH - 30 - PADDLE_WIDTH, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
                         self.network.status = "waiting"
+                        print("[GAME] Rematch ready!")
             
             if self.game_status == "running":
                 self.handle_input()
