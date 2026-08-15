@@ -8,7 +8,7 @@ import requests
 import websocket
 from pygame.locals import *
 
-# ============ НАСТРОЙКИ ============
+# ============ SETTINGS ============
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 FPS = 60
@@ -28,11 +28,12 @@ BALL_SPEED_X = 4
 BALL_SPEED_Y = 3.5
 WIN_TIME = 30
 
-# ============ API НАСТРОЙКИ ============
-API_URL = "http://localhost:3000"
-WS_URL = "ws://localhost:3001"
+# ============ API SETTINGS ============
+# Ваш сервер
+API_URL = "http://31.77.148.203:3001"
+WS_URL = "ws://31.77.148.203:3001"
 
-# ============ КЛАССЫ ДЛЯ ИГРЫ ============
+# ============ GAME CLASSES ============
 class GameObject:
     def __init__(self, x, y, width, height):
         self.x = x
@@ -121,231 +122,179 @@ class Paddle(GameObject):
         self.y = data["y"]
         self.update_rect()
 
-# ============ P2P НЕТВОРКИНГ (WebSocket + PeerJS) ============
-class P2PNetwork:
+# ============ NETWORK CLIENT (WebSocket) ============
+class NetworkClient:
     def __init__(self):
         self.ws = None
         self.is_host = False
         self.connected = False
         self.player_id = None
         self.room_id = None
-        self.peer_id = None
-        self.host_peer_id = None
-        self.running = True
         self.receive_thread = None
-        self.last_received = None
         self.game_state = None
-        self.players = []
-        self.connection_method = "WebSocket+PeerJS"
-        
-    def register_player(self, player_id, room_id):
-        """Зарегистрировать игрока на сервере"""
+        self.running = True
+        self.opponent_paddle = None
+        self.ball_state = None
+        self.status = "waiting"
+        self.last_sync_time = 0
+        self.sync_interval = 1.0 / 30
+    
+    def create_room(self, name_hash: str, password: str):
         try:
             response = requests.post(
-                f"{API_URL}/register",
-                json={
-                    "playerId": player_id,
-                    "peerId": f"player_{player_id}",
-                    "roomId": room_id
-                },
+                f"{API_URL}/create_room",
+                params={"name_hash": name_hash, "password": password},
                 timeout=3
             )
             
             if response.status_code == 200:
                 data = response.json()
-                self.player_id = player_id
-                self.room_id = room_id
-                self.is_host = data.get("isHost", False)
-                self.host_peer_id = data.get("hostPeerId")
-                self.players = data.get("players", [])
-                print(f"✅ Зарегистрирован как {'ХОСТ' if self.is_host else 'КЛИЕНТ'}")
-                print(f"   Комната: {room_id}")
-                print(f"   Игроки: {self.players}")
+                self.room_id = data["room_id"]
+                self.is_host = True
+                self.status = data["status"]
+                print(f"[OK] Room created! ID: {self.room_id}")
+                print(f"   Status: {self.status}")
                 return True
             else:
-                print(f"❌ Ошибка регистрации: {response.status_code}")
+                print(f"[ERROR] {response.status_code}")
                 return False
-                
         except Exception as e:
-            print(f"❌ Ошибка подключения к API: {e}")
+            print(f"[ERROR] Connection error: {e}")
+            return False
+    
+    def connect_to_room(self, name_hash: str, password: str):
+        try:
+            response = requests.get(
+                f"{API_URL}/connect",
+                params={"name_hash": name_hash, "password": password},
+                timeout=3
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.room_id = data["room_id"]
+                self.is_host = False
+                self.status = data["status"]
+                print(f"[OK] Connected to room! ID: {self.room_id}")
+                return True
+            else:
+                print(f"[ERROR] {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"[ERROR] Connection error: {e}")
             return False
     
     def connect_websocket(self):
-        """Подключиться к WebSocket серверу"""
         try:
-            print(f"🔌 Подключение к WebSocket: {WS_URL}")
+            ws_url = f"{WS_URL}/ws/room/{self.room_id}"
+            print(f"[WS] Connecting to WebSocket: {ws_url}")
+            
             self.ws = websocket.WebSocketApp(
-                WS_URL,
+                ws_url,
                 on_open=self.on_ws_open,
                 on_message=self.on_ws_message,
                 on_close=self.on_ws_close,
                 on_error=self.on_ws_error
             )
             
-            # Запускаем WebSocket в отдельном потоке
             self.receive_thread = threading.Thread(target=self.ws.run_forever, daemon=True)
             self.receive_thread.start()
             
-            # Ждем подключения
-            time.sleep(1)
-            return True
+            timeout = 10
+            start = time.time()
+            while not self.connected and time.time() - start < timeout:
+                time.sleep(0.1)
+            
+            return self.connected
             
         except Exception as e:
-            print(f"❌ Ошибка WebSocket: {e}")
+            print(f"[ERROR] WebSocket error: {e}")
             return False
     
     def on_ws_open(self, ws):
-        print("✅ WebSocket подключен")
-        # Отправляем регистрацию
-        ws.send(json.dumps({
-            "type": "register",
-            "playerId": self.player_id,
-            "roomId": self.room_id
-        }))
+        print("[WS] WebSocket connected")
     
     def on_ws_message(self, ws, message):
         try:
             data = json.loads(message)
+            msg_type = data.get("type")
             
-            if data.get("type") == "registered":
-                print(f"✅ Подтверждена регистрация в комнате {data.get('roomId')}")
+            if msg_type == "connected":
                 self.connected = True
+                self.is_host = data.get("is_host", False)
+                self.status = data.get("status", "waiting")
+                print(f"[WS] Connected to room {data.get('room_id')}")
+                print(f"   Role: {'HOST' if self.is_host else 'CLIENT'}")
                 
-            elif data.get("type") == "gameState":
-                # Получено игровое состояние
-                self.last_received = data.get("state")
+            elif msg_type == "status":
+                self.status = data.get("status")
+                players = data.get("players", 0)
+                print(f"[STATUS] Room status: {self.status} (players: {players})")
                 
-            elif data.get("type") == "playerLeft":
-                print(f"👋 Игрок {data.get('playerId')} покинул комнату")
+                if self.status == "running" and players == 2:
+                    print("[GAME] Game starting!")
                 
-            elif data.get("type") == "pong":
-                # Ответ на ping
-                pass
-                
+            elif msg_type == "game_state":
+                state = data.get("state", {})
+                if state:
+                    self.game_state = state
+                    
+            elif msg_type == "paddle_move":
+                paddle_data = data.get("paddle", {})
+                if paddle_data:
+                    self.opponent_paddle = paddle_data
+                    
         except Exception as e:
-            print(f"⚠️ Ошибка обработки WebSocket сообщения: {e}")
+            print(f"[ERROR] Message error: {e}")
     
     def on_ws_close(self, ws, close_status_code, close_msg):
-        print("🔌 WebSocket отключен")
+        print("[WS] WebSocket disconnected")
         self.connected = False
     
     def on_ws_error(self, ws, error):
-        print(f"⚠️ WebSocket ошибка: {error}")
-    
-    def start_host(self, room_id=None):
-        """Стать хостом"""
-        print("\n" + "="*50)
-        print("🎮 ЗАПУСК В РЕЖИМЕ ХОСТА")
-        print("="*50 + "\n")
-        self.is_host = True
-        
-        # Генерируем ID игрока и комнаты
-        self.player_id = f"host_{random.randint(1000, 9999)}"
-        self.room_id = room_id or f"room_{random.randint(1000, 9999)}"
-        
-        # Регистрируемся
-        if not self.register_player(self.player_id, self.room_id):
-            return False
-        
-        # Подключаем WebSocket
-        if not self.connect_websocket():
-            return False
-        
-        # Ждем подключения
-        print(f"\n📨 КОМНАТА: {self.room_id}")
-        print(f"📨 Ваш ID: {self.player_id}")
-        print("\n💡 Отправь другу:")
-        print(f"   ROOM ID: {self.room_id}")
-        print("⏳ Ожидаем подключения игрока...\n")
-        
-        # Ждем пока кто-то подключится
-        timeout = 120
-        start_wait = time.time()
-        while not self.connected or len(self.players) < 2:
-            if time.time() - start_wait > timeout:
-                print("❌ Таймаут ожидания")
-                return False
-            time.sleep(1)
-            # Обновляем список игроков
-            self.update_players()
-        
-        print(f"\n✅ ИГРОК ПОДКЛЮЧИЛСЯ!")
-        print(f"   Игроки: {self.players}\n")
-        return True
-    
-    def connect_to_host(self, room_id):
-        """Подключиться к хосту"""
-        print("\n" + "="*50)
-        print("🎮 ПОДКЛЮЧЕНИЕ К ХОСТУ")
-        print("="*50 + "\n")
-        self.is_host = False
-        
-        # Генерируем ID игрока
-        self.player_id = f"client_{random.randint(1000, 9999)}"
-        self.room_id = room_id
-        
-        # Регистрируемся
-        if not self.register_player(self.player_id, self.room_id):
-            return False
-        
-        # Подключаем WebSocket
-        if not self.connect_websocket():
-            return False
-        
-        print(f"\n📨 Подключение к комнате: {room_id}")
-        print("⏳ Ожидаем начала игры...\n")
-        
-        # Ждем подключения
-        timeout = 30
-        start_wait = time.time()
-        while not self.connected:
-            if time.time() - start_wait > timeout:
-                print("❌ Таймаут подключения")
-                return False
-            time.sleep(0.5)
-        
-        print(f"\n✅ ПОДКЛЮЧЕНО К КОМНАТЕ {room_id}!")
-        print(f"   Ваш ID: {self.player_id}\n")
-        return True
-    
-    def update_players(self):
-        """Обновить список игроков в комнате"""
-        try:
-            response = requests.get(f"{API_URL}/players/{self.room_id}", timeout=2)
-            if response.status_code == 200:
-                data = response.json()
-                self.players = data.get("players", [])
-                self.host_peer_id = data.get("hostPeerId")
-        except:
-            pass
+        print(f"[ERROR] WebSocket error: {error}")
     
     def send_game_state(self, state):
-        """Отправить состояние игры"""
         if not self.connected or not self.ws:
             return
         
         try:
             message = {
-                "type": "gameState",
-                "roomId": self.room_id,
-                "state": state,
-                "playerId": self.player_id,
-                "isHost": self.is_host
+                "type": "game_state",
+                "state": state
             }
             self.ws.send(json.dumps(message))
         except Exception as e:
-            print(f"⚠️ Ошибка отправки: {e}")
+            print(f"[ERROR] Send error: {e}")
     
-    def receive_game_state(self):
-        """Получить состояние игры"""
-        if self.last_received is not None:
-            data = self.last_received
-            self.last_received = None
-            return data
+    def send_paddle_move(self, paddle_data):
+        if not self.connected or not self.ws:
+            return
+        
+        try:
+            message = {
+                "type": "paddle_move",
+                "paddle": paddle_data
+            }
+            self.ws.send(json.dumps(message))
+        except Exception as e:
+            pass
+    
+    def get_latest_state(self):
+        if self.game_state:
+            state = self.game_state
+            self.game_state = None
+            return state
+        return None
+    
+    def get_opponent_paddle(self):
+        if self.opponent_paddle:
+            paddle = self.opponent_paddle
+            self.opponent_paddle = None
+            return paddle
         return None
     
     def close(self):
-        """Закрыть соединение"""
         self.running = False
         if self.ws:
             try:
@@ -354,7 +303,7 @@ class P2PNetwork:
                 pass
         self.ws = None
 
-# ============ ГЛАВНОЕ МЕНЮ ============
+# ============ MAIN MENU ============
 class Menu:
     def __init__(self, screen):
         self.screen = screen
@@ -364,27 +313,30 @@ class Menu:
         self.font_small = pygame.font.Font(None, 28)
         self.running = True
         self.selected = 0
-        self.menu_items = ["🎮 Хост (Создать игру)", "🔗 Подключиться", "❌ Выход"]
+        self.menu_items = ["Host (Create Game)", "Connect", "Exit"]
         self.input_text = ""
         self.input_active = False
-        self.input_mode = "host"  # "host" или "connect"
+        self.input_mode = "host"
         self.input_rect = pygame.Rect(SCREEN_WIDTH//2 - 200, SCREEN_HEIGHT//2 + 30, 400, 50)
-        self.status_message = "Выберите режим игры"
+        self.status_message = "Select game mode"
         self.status_color = WHITE
+        self.name_hash = f"player_{random.randint(1000, 9999)}"
+        self.password = ""
         
     def draw(self):
         self.screen.fill(BLUE)
         
-        # Заголовок
-        title = self.font_title.render("PING PONG P2P", True, WHITE)
+        title = self.font_title.render("PING PONG", True, WHITE)
         self.screen.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, 50))
         
-        # Подзаголовок
-        subtitle = self.font.render("с поддержкой PeerJS", True, YELLOW)
+        subtitle = self.font.render("WebSocket Multiplayer", True, YELLOW)
         self.screen.blit(subtitle, (SCREEN_WIDTH//2 - subtitle.get_width()//2, 130))
         
+        # Показываем адрес сервера
+        server_text = self.font_small.render(f"Server: {API_URL}", True, (200, 200, 200))
+        self.screen.blit(server_text, (SCREEN_WIDTH//2 - server_text.get_width()//2, 180))
+        
         if not self.input_active:
-            # Меню
             for i, item in enumerate(self.menu_items):
                 color = YELLOW if i == self.selected else WHITE
                 text = self.font.render(item, True, color)
@@ -395,30 +347,29 @@ class Menu:
                 if i == self.selected:
                     pygame.draw.rect(self.screen, YELLOW, (x - 20, y - 5, text.get_width() + 40, 50), 2)
         else:
-            # Режим ввода Room ID
-            mode_text = "ВВЕДИТЕ ROOM ID:" if self.input_mode == "connect" else "ВВЕДИТЕ НАЗВАНИЕ КОМНАТЫ:"
+            mode_text = "ENTER PASSWORD:" 
             prompt = self.font.render(mode_text, True, WHITE)
             self.screen.blit(prompt, (SCREEN_WIDTH//2 - prompt.get_width()//2, SCREEN_HEIGHT//2 - 70))
             
-            # Поле ввода
             pygame.draw.rect(self.screen, WHITE, self.input_rect, 2)
-            text_surface = self.font.render(self.input_text, True, WHITE)
+            text_surface = self.font.render("*" * len(self.password), True, WHITE)
             self.screen.blit(text_surface, (self.input_rect.x + 10, self.input_rect.y + 10))
             
-            # Подсказки
-            hint1 = self.font_small.render("ESC - отмена | ENTER - продолжить", True, WHITE)
+            hint1 = self.font_small.render("ESC - cancel | ENTER - continue", True, WHITE)
             self.screen.blit(hint1, (SCREEN_WIDTH//2 - hint1.get_width()//2, SCREEN_HEIGHT//2 + 100))
             
             if self.input_mode == "host":
-                hint2 = self.font_small.render("Оставь пустым для автоматической генерации", True, (200, 200, 200))
+                hint2 = self.font_small.render("Create a password for the room", True, (200, 200, 200))
             else:
-                hint2 = self.font_small.render("Введи Room ID, который дал тебе хост", True, (200, 200, 200))
+                hint2 = self.font_small.render("Enter the room password", True, (200, 200, 200))
             self.screen.blit(hint2, (SCREEN_WIDTH//2 - hint2.get_width()//2, SCREEN_HEIGHT//2 + 130))
         
-        # Статус
         if self.status_message:
             status_text = self.font_small.render(self.status_message, True, self.status_color)
             self.screen.blit(status_text, (SCREEN_WIDTH//2 - status_text.get_width()//2, SCREEN_HEIGHT - 50))
+        
+        name_text = self.font_small.render(f"Your ID: {self.name_hash}", True, (200, 200, 200))
+        self.screen.blit(name_text, (10, SCREEN_HEIGHT - 30))
         
         pygame.display.flip()
     
@@ -432,52 +383,51 @@ class Menu:
                     if self.input_active:
                         if event.key == K_ESCAPE:
                             self.input_active = False
-                            self.input_text = ""
-                            self.status_message = "Выберите режим игры"
+                            self.password = ""
+                            self.status_message = "Select game mode"
                             self.status_color = WHITE
                         elif event.key == K_RETURN:
-                            if self.input_mode == "host":
-                                room_id = self.input_text.strip() or None
-                                return ("host", room_id)
-                            else:  # connect
-                                if self.input_text.strip():
-                                    return ("connect", self.input_text.strip())
+                            if self.password.strip():
+                                if self.input_mode == "host":
+                                    return ("host", self.name_hash, self.password)
                                 else:
-                                    self.status_message = "❌ Введите Room ID!"
-                                    self.status_color = RED
+                                    return ("connect", self.name_hash, self.password)
+                            else:
+                                self.status_message = "[ERROR] Enter password!"
+                                self.status_color = RED
                         elif event.key == K_BACKSPACE:
-                            self.input_text = self.input_text[:-1]
+                            self.password = self.password[:-1]
                         else:
-                            self.input_text += event.unicode
+                            self.password += event.unicode
                     else:
                         if event.key == K_UP:
                             self.selected = (self.selected - 1) % len(self.menu_items)
                         elif event.key == K_DOWN:
                             self.selected = (self.selected + 1) % len(self.menu_items)
                         elif event.key == K_RETURN:
-                            if self.selected == 0:  # Хост
+                            if self.selected == 0:
                                 self.input_active = True
                                 self.input_mode = "host"
-                                self.input_text = ""
-                                self.status_message = "Введите название комнаты (или оставь пустым)"
+                                self.password = ""
+                                self.status_message = "Enter password for room"
                                 self.status_color = YELLOW
-                            elif self.selected == 1:  # Подключиться
+                            elif self.selected == 1:
                                 self.input_active = True
                                 self.input_mode = "connect"
-                                self.input_text = ""
-                                self.status_message = "Введите Room ID хоста"
+                                self.password = ""
+                                self.status_message = "Enter room password"
                                 self.status_color = YELLOW
-                            elif self.selected == 2:  # Выход
-                                return ("exit", None)
+                            elif self.selected == 2:
+                                return ("exit", None, None)
             
             self.draw()
             self.clock.tick(FPS)
         
         return None
 
-# ============ КЛАСС ИГРЫ ============
-class P2PGame:
-    def __init__(self, screen, is_host, room_id=None):
+# ============ GAME CLASS ============
+class Game:
+    def __init__(self, screen, is_host, name_hash, password):
         self.screen = screen
         self.clock = pygame.time.Clock()
         self.is_host = is_host
@@ -487,191 +437,183 @@ class P2PGame:
         self.winner = None
         self.error_message = ""
         
-        # Игровые объекты
         self.ball = Ball(SCREEN_WIDTH//2 - BALL_SIZE//2, SCREEN_HEIGHT//2 - BALL_SIZE//2)
         self.left_paddle = Paddle(30, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
         self.right_paddle = Paddle(SCREEN_WIDTH - 30 - PADDLE_WIDTH, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
         
-        # Шрифты
         self.font = pygame.font.Font(None, 36)
         self.big_font = pygame.font.Font(None, 72)
         self.small_font = pygame.font.Font(None, 28)
         
-        # P2P сеть
-        self.network = P2PNetwork()
-        self.last_sync_time = 0
-        self.sync_interval = 1.0 / 30
-        self.frame_count = 0
+        self.network = NetworkClient()
         
-        # Подключение
         if is_host:
-            if not self.network.start_host(room_id):
-                self.error_message = "Не удалось создать игру"
+            if not self.network.create_room(name_hash, password):
+                self.error_message = "Failed to create room"
                 self.running = False
                 return
-            self.game_status = "waiting"
         else:
-            if not room_id:
-                self.error_message = "Нет Room ID для подключения"
+            if not self.network.connect_to_room(name_hash, password):
+                self.error_message = "Failed to connect to room"
                 self.running = False
                 return
-            if not self.network.connect_to_host(room_id):
-                self.error_message = "Не удалось подключиться"
-                self.running = False
-                return
-            self.game_status = "waiting"
         
-        self.start_time = time.time()
-        print("✅ Игра готова!")
-        print(f"📡 Метод подключения: {self.network.connection_method}")
+        if not self.network.connect_websocket():
+            self.error_message = "Failed to connect to WebSocket"
+            self.running = False
+            return
+        
+        self.game_status = "waiting"
+        self.start_time = None
+        self.last_paddle_sync = 0
+        self.paddle_sync_interval = 1.0 / 15
+        
+        print("[GAME] Game ready!")
     
     def handle_input(self):
         keys = pygame.key.get_pressed()
+        paddle_moved = False
+        paddle_data = None
         
         if self.is_host:
             if keys[K_w]:
                 self.left_paddle.move_up()
+                paddle_moved = True
             if keys[K_s]:
                 self.left_paddle.move_down()
+                paddle_moved = True
+            if paddle_moved:
+                paddle_data = self.left_paddle.to_dict()
         else:
             if keys[K_UP]:
                 self.right_paddle.move_up()
+                paddle_moved = True
             if keys[K_DOWN]:
                 self.right_paddle.move_down()
+                paddle_moved = True
+            if paddle_moved:
+                paddle_data = self.right_paddle.to_dict()
+        
+        if paddle_moved and paddle_data:
+            current_time = time.time()
+            if current_time - self.last_paddle_sync >= self.paddle_sync_interval:
+                self.network.send_paddle_move(paddle_data)
+                self.last_paddle_sync = current_time
     
     def update(self):
         if self.game_status != "running":
             return
         
-        self.ball.update()
-        
-        if self.ball.y <= 0 or self.ball.y + self.ball.height >= SCREEN_HEIGHT:
-            self.ball.bounce_y()
-        
-        if self.ball.collides_with(self.left_paddle):
-            self.ball.x = self.left_paddle.x + self.left_paddle.width
-            self.ball.bounce_x()
-        
-        if self.ball.collides_with(self.right_paddle):
-            self.ball.x = self.right_paddle.x - self.ball.width
-            self.ball.bounce_x()
-        
-        if self.ball.x <= 0:
-            self.game_status = "lose"
-            self.winner = "opponent"
-            self.running = False
-        elif self.ball.x + self.ball.width >= SCREEN_WIDTH:
-            self.game_status = "win"
-            self.winner = "me"
-            self.running = False
-        
-        if self.start_time and time.time() - self.start_time >= WIN_TIME:
-            self.game_status = "win" if self.is_host else "lose"
-            self.winner = "me" if self.is_host else "opponent"
-            self.running = False
-    
-    def sync_network(self):
-        current_time = time.time()
-        if current_time - self.last_sync_time < self.sync_interval:
-            return
-        
-        self.last_sync_time = current_time
-        
-        if self.is_host:
-            # Хост отправляет полное состояние
-            state = {
-                "ball": self.ball.to_dict(),
-                "left_paddle": self.left_paddle.to_dict(),
-                "right_paddle": self.right_paddle.to_dict(),
-                "status": self.game_status,
-                "time": time.time() - self.start_time if self.start_time else 0
-            }
-            self.network.send_game_state(state)
-        else:
-            # Клиент отправляет только свою ракетку
-            state = {
-                "right_paddle": self.right_paddle.to_dict()
-            }
-            self.network.send_game_state(state)
-            
-            # Получаем состояние от хоста
-            received = self.network.receive_game_state()
-            if received:
-                if "ball" in received:
-                    self.ball.from_dict(received["ball"])
-                if "left_paddle" in received:
-                    self.left_paddle.from_dict(received["left_paddle"])
-                if "status" in received:
-                    self.game_status = received["status"]
+        if not self.is_host:
+            state = self.network.get_latest_state()
+            if state:
+                if "ball" in state:
+                    self.ball.from_dict(state["ball"])
+                if "left_paddle" in state:
+                    self.left_paddle.from_dict(state["left_paddle"])
+                if "right_paddle" in state:
+                    self.right_paddle.from_dict(state["right_paddle"])
+                if "status" in state:
+                    self.game_status = state["status"]
                     if self.game_status != "running" and self.running:
                         self.running = False
+                return
+        
+        if self.is_host:
+            self.ball.update()
+            
+            if self.ball.y <= 0 or self.ball.y + self.ball.height >= SCREEN_HEIGHT:
+                self.ball.bounce_y()
+            
+            if self.ball.collides_with(self.left_paddle):
+                self.ball.x = self.left_paddle.x + self.left_paddle.width
+                self.ball.bounce_x()
+            
+            if self.ball.collides_with(self.right_paddle):
+                self.ball.x = self.right_paddle.x - self.ball.width
+                self.ball.bounce_x()
+            
+            if self.ball.x <= 0:
+                self.game_status = "lose" if self.is_host else "win"
+                self.winner = "opponent" if self.is_host else "me"
+                self.running = False
+            elif self.ball.x + self.ball.width >= SCREEN_WIDTH:
+                self.game_status = "win" if self.is_host else "lose"
+                self.winner = "me" if self.is_host else "opponent"
+                self.running = False
+            
+            if self.start_time and time.time() - self.start_time >= WIN_TIME:
+                self.game_status = "win" if self.is_host else "lose"
+                self.winner = "me" if self.is_host else "opponent"
+                self.running = False
+            
+            if self.game_status == "running":
+                state = {
+                    "ball": self.ball.to_dict(),
+                    "left_paddle": self.left_paddle.to_dict(),
+                    "right_paddle": self.right_paddle.to_dict(),
+                    "status": self.game_status,
+                    "time": time.time() - self.start_time if self.start_time else 0
+                }
+                self.network.send_game_state(state)
+            
+            opponent_paddle = self.network.get_opponent_paddle()
+            if opponent_paddle:
+                self.right_paddle.from_dict(opponent_paddle)
     
     def draw(self):
         self.screen.fill(BLUE)
         
-        # Центральная линия
         pygame.draw.line(self.screen, WHITE, (SCREEN_WIDTH//2, 0), (SCREEN_WIDTH//2, SCREEN_HEIGHT), 2)
         pygame.draw.circle(self.screen, WHITE, (SCREEN_WIDTH//2, SCREEN_HEIGHT//2), 60, 2)
         
-        # Игровые объекты
         self.ball.draw(self.screen)
         self.left_paddle.draw(self.screen)
         self.right_paddle.draw(self.screen)
         
-        # Время
         if self.start_time and self.game_status == "running":
             elapsed = int(time.time() - self.start_time)
             time_text = self.font.render(f"Time: {elapsed}s", True, WHITE)
             self.screen.blit(time_text, (10, 10))
         
-        # Роль
-        role = "ХОСТ" if self.is_host else "КЛИЕНТ"
+        role = "HOST" if self.is_host else "CLIENT"
         role_text = self.font.render(role, True, YELLOW)
         self.screen.blit(role_text, (SCREEN_WIDTH - 120, 10))
         
-        # Room ID
         if self.network.room_id:
-            room_text = self.small_font.render(f"Комната: {self.network.room_id}", True, (200, 200, 200))
+            room_text = self.small_font.render(f"Room: {self.network.room_id[:8]}...", True, (200, 200, 200))
             self.screen.blit(room_text, (10, SCREEN_HEIGHT - 30))
         
-        # Игроки
-        if self.network.players:
-            players_text = self.small_font.render(f"Игроки: {len(self.network.players)}", True, (200, 200, 200))
-            self.screen.blit(players_text, (SCREEN_WIDTH - 150, SCREEN_HEIGHT - 30))
+        status_text = self.small_font.render(f"Status: {self.network.status}", True, (150, 200, 150))
+        self.screen.blit(status_text, (SCREEN_WIDTH - 200, SCREEN_HEIGHT - 30))
         
-        # Статус ожидания
         if self.game_status == "waiting":
-            wait_text = self.big_font.render("ОЖИДАНИЕ", True, YELLOW)
+            wait_text = self.big_font.render("WAITING", True, YELLOW)
             self.screen.blit(wait_text, (SCREEN_WIDTH//2 - wait_text.get_width()//2, SCREEN_HEIGHT//2 - 50))
             
             if self.is_host:
-                sub_text = self.small_font.render(f"Ожидаем подключения в комнате {self.network.room_id}...", True, WHITE)
+                sub_text = self.small_font.render(f"Waiting for player in room {self.network.room_id[:12]}...", True, WHITE)
             else:
-                sub_text = self.small_font.render("Ожидаем начала игры...", True, WHITE)
+                sub_text = self.small_font.render("Waiting for game to start...", True, WHITE)
             self.screen.blit(sub_text, (SCREEN_WIDTH//2 - sub_text.get_width()//2, SCREEN_HEIGHT//2 + 30))
             
-            if self.is_host and self.network.connected and len(self.network.players) >= 2:
-                start_text = self.font.render("Нажми SPACE для начала игры", True, GREEN)
+            if self.is_host and self.network.connected and self.network.status == "running":
+                start_text = self.font.render("Press SPACE to start", True, GREEN)
                 self.screen.blit(start_text, (SCREEN_WIDTH//2 - start_text.get_width()//2, SCREEN_HEIGHT//2 + 80))
-            elif self.is_host:
-                wait_players = self.small_font.render(f"Подключено игроков: {len(self.network.players)}/2", True, YELLOW)
-                self.screen.blit(wait_players, (SCREEN_WIDTH//2 - wait_players.get_width()//2, SCREEN_HEIGHT//2 + 80))
         
-        # Результат
         if self.game_status == "win":
-            win_text = self.big_font.render("ТЫ ПОБЕДИЛ! 🏆", True, GREEN)
+            win_text = self.big_font.render("YOU WIN!", True, GREEN)
             self.screen.blit(win_text, (SCREEN_WIDTH//2 - win_text.get_width()//2, SCREEN_HEIGHT//2 - 50))
-            restart_text = self.font.render("Нажми R для реванша", True, WHITE)
+            restart_text = self.font.render("Press R for rematch", True, WHITE)
             self.screen.blit(restart_text, (SCREEN_WIDTH//2 - restart_text.get_width()//2, SCREEN_HEIGHT//2 + 30))
         elif self.game_status == "lose":
-            lose_text = self.big_font.render("ТЫ ПРОИГРАЛ! 😢", True, RED)
+            lose_text = self.big_font.render("YOU LOSE!", True, RED)
             self.screen.blit(lose_text, (SCREEN_WIDTH//2 - lose_text.get_width()//2, SCREEN_HEIGHT//2 - 50))
-            restart_text = self.font.render("Нажми R для реванша", True, WHITE)
+            restart_text = self.font.render("Press R for rematch", True, WHITE)
             self.screen.blit(restart_text, (SCREEN_WIDTH//2 - restart_text.get_width()//2, SCREEN_HEIGHT//2 + 30))
         
-        # Ошибка
         if self.error_message:
-            error_text = self.small_font.render(f"❌ {self.error_message}", True, RED)
+            error_text = self.small_font.render(f"[ERROR] {self.error_message}", True, RED)
             self.screen.blit(error_text, (SCREEN_WIDTH//2 - error_text.get_width()//2, SCREEN_HEIGHT - 70))
         
         pygame.display.flip()
@@ -685,12 +627,12 @@ class P2PGame:
                     if event.key == K_ESCAPE:
                         self.running = False
                     if event.key == K_SPACE and self.game_status == "waiting" and self.is_host:
-                        if self.network.connected and len(self.network.players) >= 2:
+                        if self.network.connected and self.network.status == "running":
                             self.game_status = "running"
                             self.start_time = time.time()
                             self.ball.reset()
                         else:
-                            print("⏳ Ждем подключения второго игрока...")
+                            print("[GAME] Waiting for second player...")
                     if event.key == K_r and (self.game_status == "win" or self.game_status == "lose"):
                         self.game_status = "waiting"
                         self.start_time = None
@@ -702,7 +644,6 @@ class P2PGame:
             if self.game_status == "running":
                 self.handle_input()
                 self.update()
-                self.sync_network()
             
             self.draw()
             self.clock.tick(FPS)
@@ -710,11 +651,11 @@ class P2PGame:
         self.network.close()
         return
 
-# ============ ГЛАВНАЯ ФУНКЦИЯ ============
+# ============ MAIN FUNCTION ============
 def main():
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("Ping Pong P2P")
+    pygame.display.set_caption("Ping Pong - WebSocket Multiplayer")
     
     while True:
         menu = Menu(screen)
@@ -724,12 +665,12 @@ def main():
             break
         
         if result[0] == "host":
-            room_id = result[1]
-            game = P2PGame(screen, True, room_id)
+            _, name_hash, password = result
+            game = Game(screen, True, name_hash, password)
             game.run()
         elif result[0] == "connect":
-            room_id = result[1]
-            game = P2PGame(screen, False, room_id)
+            _, name_hash, password = result
+            game = Game(screen, False, name_hash, password)
             game.run()
     
     pygame.quit()
