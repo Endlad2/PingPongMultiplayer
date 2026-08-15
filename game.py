@@ -18,7 +18,6 @@ BLUE = (135, 206, 235)
 GREEN = (0, 255, 0)
 RED = (255, 0, 0)
 YELLOW = (255, 255, 0)
-PURPLE = (147, 0, 211)
 
 PADDLE_WIDTH = 20
 PADDLE_HEIGHT = 140
@@ -29,7 +28,6 @@ BALL_SPEED_Y = 3.5
 WIN_TIME = 30
 
 # ============ API SETTINGS ============
-# Ваш сервер
 API_URL = "http://31.77.148.203:3001"
 WS_URL = "ws://31.77.148.203:3001"
 
@@ -138,6 +136,7 @@ class NetworkClient:
         self.status = "waiting"
         self.last_sync_time = 0
         self.sync_interval = 1.0 / 30
+        self.room_ready = False  # Флаг готовности комнаты
     
     def create_room(self, name_hash: str, password: str):
         try:
@@ -225,14 +224,17 @@ class NetworkClient:
                 self.status = data.get("status", "waiting")
                 print(f"[WS] Connected to room {data.get('room_id')}")
                 print(f"   Role: {'HOST' if self.is_host else 'CLIENT'}")
+                print(f"   Status: {self.status}")
                 
             elif msg_type == "status":
-                self.status = data.get("status")
+                new_status = data.get("status")
                 players = data.get("players", 0)
-                print(f"[STATUS] Room status: {self.status} (players: {players})")
+                print(f"[STATUS] Room status: {new_status} (players: {players})")
+                self.status = new_status
                 
-                if self.status == "running" and players == 2:
+                if new_status == "running" and players == 2:
                     print("[GAME] Game starting!")
+                    self.room_ready = True
                 
             elif msg_type == "game_state":
                 state = data.get("state", {})
@@ -332,7 +334,6 @@ class Menu:
         subtitle = self.font.render("WebSocket Multiplayer", True, YELLOW)
         self.screen.blit(subtitle, (SCREEN_WIDTH//2 - subtitle.get_width()//2, 130))
         
-        # Показываем адрес сервера
         server_text = self.font_small.render(f"Server: {API_URL}", True, (200, 200, 200))
         self.screen.blit(server_text, (SCREEN_WIDTH//2 - server_text.get_width()//2, 180))
         
@@ -467,6 +468,7 @@ class Game:
         self.start_time = None
         self.last_paddle_sync = 0
         self.paddle_sync_interval = 1.0 / 15
+        self.waiting_for_start = True
         
         print("[GAME] Game ready!")
     
@@ -501,6 +503,13 @@ class Game:
                 self.last_paddle_sync = current_time
     
     def update(self):
+        # Проверяем статус комнаты
+        if self.network.status == "running" and self.game_status == "waiting":
+            self.game_status = "running"
+            self.start_time = time.time()
+            self.ball.reset()
+            print("[GAME] Game started!")
+        
         if self.game_status != "running":
             return
         
@@ -631,6 +640,7 @@ class Game:
                             self.game_status = "running"
                             self.start_time = time.time()
                             self.ball.reset()
+                            print("[GAME] Game started by host!")
                         else:
                             print("[GAME] Waiting for second player...")
                     if event.key == K_r and (self.game_status == "win" or self.game_status == "lose"):
@@ -640,6 +650,7 @@ class Game:
                         self.ball.reset()
                         self.left_paddle.set_position(30, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
                         self.right_paddle.set_position(SCREEN_WIDTH - 30 - PADDLE_WIDTH, SCREEN_HEIGHT//2 - PADDLE_HEIGHT//2)
+                        self.network.status = "waiting"
             
             if self.game_status == "running":
                 self.handle_input()
